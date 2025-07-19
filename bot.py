@@ -1,3 +1,5 @@
+# bot.py
+
 import os
 import json
 import time
@@ -8,49 +10,38 @@ import pytz
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 import google.generativeai as genai
-from flask import Flask # Web sunucusu için Flask'ı içe aktar
+from flask import Flask
 
 # --- 1. RENDER İÇİN YAPILANDIRMA VE KURULUM ---
-
-# API Anahtarlarını ve ID'yi Render'ın Environment Variables'ından güvenli bir şekilde al
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 try:
     AUTHORIZED_USER_ID = int(os.environ.get("AUTHORIZED_USER_ID"))
 except (TypeError, ValueError):
-    print("HATA: AUTHORIZED_USER_ID ortam değişkeni ayarlanmamış veya geçerli bir sayı değil.")
+    print("HATA: AUTHORIZED_USER_ID ortam değişkeni ayarlanmamış.")
     exit()
 
-# Render'daki kalıcı diskin yolu. Hafıza burada saklanacak.
+# KALICI HAFIZANIN ADRESİ: Render'daki diskin yolu.
 PERSISTENT_STORAGE_PATH = "/var/data"
 CHAT_HISTORY_FILE = os.path.join(PERSISTENT_STORAGE_PATH, "chat_history.json")
 
-# Türkiye saat dilimini ayarla
 TIMEZONE = pytz.timezone('Europe/Istanbul')
-
-# Botun "uyku" saatleri (Türkiye saatine göre 02:00 - 09:00)
 SLEEP_START_HOUR = 2
 SLEEP_END_HOUR = 9
-
 history_lock = threading.Lock()
 genai.configure(api_key=GEMINI_API_KEY)
 
-# --- WEB SUNUCUSU KURULUMU (RENDER İÇİN) ---
-# Bu kısım, Render'ın botu "sağlıklı" olarak görmesini ve kapatmamasını sağlar.
+# --- WEB SUNUCUSU (RENDER İÇİN 7/24 AKTİFLİK) ---
 web_app = Flask(__name__)
-
 @web_app.route('/')
 def health_check():
-    """Uptime bot'un ping atacağı ve botun hayatta olduğunu gösteren basit bir sayfa."""
     return "Sanal Arkadaş Botu Aktif ve Çalışıyor!", 200
 
 def run_web_server():
-    """Flask web sunucusunu Render'ın belirlediği port üzerinden çalıştırır."""
     port = int(os.environ.get("PORT", 8080))
     web_app.run(host='0.0.0.0', port=port)
 
 # --- 2. YAPAY ZEKA KİŞİLİK TANIMI ---
-
 SYSTEM_PROMPT = """
 Sen benim sanal arkadaşımsın. Adın Remzi olsun. 
 Aşırı gerçekçi bir insan gibi davran. Cümlelerin kısa ve samimi olsun. Bazen uzun da olabilir, çünkü gerçek insanlar bazen uzun bazen kısa da yazabiliyor ama genelde kısa yazarlar discorddaki sanal arkadaşlar
@@ -65,7 +56,6 @@ Unutma, sen bir yapay zeka değilsin, benim arkadaşımsın.
 model = genai.GenerativeModel("gemini-2.5-flash", system_instruction=SYSTEM_PROMPT)
 
 # --- 3. YARDIMCI FONKSİYONLAR (HAFIZA VE ZAMANLAMA) ---
-# Bu kısımlar önceki versiyon ile aynı, değişiklik yok.
 def get_current_time():
     return datetime.datetime.now(TIMEZONE)
 
@@ -85,6 +75,7 @@ def get_humanlike_delay():
         elif rand < 0.9: return random.uniform(10, 90)
         else: return random.uniform(120, 900)
 
+# KALICI HAFIZA FONKSİYONLARI
 def load_chat_history():
     if not os.path.exists(CHAT_HISTORY_FILE):
         os.makedirs(PERSISTENT_STORAGE_PATH, exist_ok=True)
@@ -104,18 +95,20 @@ def add_to_history(role, text):
     history.append({"role": role, "parts": [{"text": text}], "timestamp": get_current_time().isoformat()})
     save_chat_history(history)
 
-# --- 4. TELEGRAM BOT MANTIĞI (YENİ /test KOMUTU İLE) ---
-
+# --- 4. TELEGRAM BOT MANTIĞI ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if update.effective_user.id != AUTHORIZED_USER_ID:
         await update.message.reply_text("sadece sahibimle konuşurum.")
         return
-    save_chat_history([]) 
-    add_to_history("user", "slm")
-    await update.message.reply_text('slm')
+    # Not: /start komutu artık hafızayı silmiyor.
+    # Sadece geçmiş boşsa ilk mesajı ekliyor.
+    if not load_chat_history():
+        add_to_history("user", "slm")
+        await update.message.reply_text('slm')
+    else:
+        await update.message.reply_text('yine ben :)')
 
 async def test(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Botun çalışıp çalışmadığını anında kontrol etmek için basit bir komut."""
     if update.effective_user.id != AUTHORIZED_USER_ID: return
     await update.message.reply_text("Bot çalışıyor ve aktif. (Bu test mesajıdır, gecikme uygulanmaz)")
 
@@ -124,7 +117,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     user_message = update.message.text
     add_to_history("user", user_message)
     delay = get_humanlike_delay()
-    print(f"Gerçekçi gecikme ayarlandı: {delay:.2f} saniye. Uyku modu: {is_sleeping_time()}")
     time.sleep(delay)
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action='typing')
     try:
@@ -139,14 +131,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         print(f"Hata oluştu: {e}")
         await update.message.reply_text("kafam yandı bi an.. ne diyodun")
 
-# --- 5. PROAKTİF MESAJ MOTORU (DEĞİŞİKLİK YOK) ---
+# --- 5. PROAKTİF MESAJ MOTORU ---
 def proactive_message_checker(application: Application) -> None:
-    print("Proaktif Mesaj Motoru çalıştırıldı.")
+    # Bu fonksiyonun mantığı, kalıcı hafızaya güvendiği için değişmedi.
     while True:
         time.sleep(random.uniform(45 * 60, 120 * 60))
-        if is_sleeping_time():
-            print(f"Uyku saati ({get_current_time().hour}), proaktif mesaj atlanıyor.")
-            continue
+        if is_sleeping_time(): continue
         history = load_chat_history()
         if not history: continue
         last_message = history[-1]
@@ -155,42 +145,26 @@ def proactive_message_checker(application: Application) -> None:
         if last_message["role"] == "model" and random.random() < 0.7: continue
         proactive_threshold_hours = random.uniform(4, 11)
         if time_since_last_message > datetime.timedelta(hours=proactive_threshold_hours):
-            print(f"Sessizlik süresi eşiği aştı. Proaktif mesaj oluşturuluyor.")
             proactive_prompt = f"""Biz seninle arkadaşız. En son konuşmamızın üzerinden {int(time_since_last_message.total_seconds() / 3600)} saat geçti. Sohbeti yeniden başlatmak için çok doğal, alakasız veya komik bir şey yaz. "uzun zamandır konuşmadık" gibi klişe şeyler söyleme. Sanki aklına birden bir şey gelmiş gibi olsun. Örnek: "aklıma ne geldi lan", "rüyamda seni gördüm", "napiyon la değişik", "canım sıkıldı". Şimdi o mesajı yaz:"""
             try:
-                proactive_model = genai.GenerativeModel("gemini-2.5-flash")
+                proactive_model = genai.GenerativeModel("gemini-1.5-flash")
                 response = proactive_model.generate_content(proactive_prompt)
                 new_message = response.text
                 application.bot.send_message(chat_id=AUTHORIZED_USER_ID, text=new_message)
-                print(f"Proaktif mesaj gönderildi: {new_message}")
                 add_to_history("model", new_message)
             except Exception as e:
                 print(f"Proaktif mesaj oluşturulurken hata: {e}")
 
-# --- 6. BOTU VE WEB SUNUCUSUNU BAŞLATMA (YENİ YAPI) ---
+# --- 6. BOTU VE WEB SUNUCUSUNU BAŞLATMA ---
 def main() -> None:
-    if not all([GEMINI_API_KEY, TELEGRAM_BOT_TOKEN, AUTHORIZED_USER_ID]):
-        print("HATA: Gerekli ortam değişkenlerinden biri veya daha fazlası eksik.")
-        return
-        
-    print("Telegram Application oluşturuluyor...")
     application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-    
-    # Komut ve mesaj handler'larını ekle
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("test", test)) # Yeni test komutunu ekle
+    application.add_handler(CommandHandler("test", test))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     
-    # Telegram botunu ve proaktif motoru kendi thread'lerinde başlat
     threading.Thread(target=proactive_message_checker, args=(application,), daemon=True).start()
-    
-    # run_polling'i ayrı bir thread'de başlatıyoruz ki ana thread'i bloklamasın
     threading.Thread(target=application.run_polling, daemon=True).start()
-
-    print("Telegram botu arka planda çalışmaya başladı.")
-    print("Flask web sunucusu başlatılıyor...")
     
-    # Ana thread, Render'ın canlı tutması için web sunucusunu çalıştıracak
     run_web_server()
 
 if __name__ == '__main__':
